@@ -1,4 +1,4 @@
-import { openSync } from '@op-engineering/op-sqlite';
+import { open, openSync, type DB } from '@op-engineering/op-sqlite';
 
 const DATABASE_NAME = 'turso_op_v6.db';
 
@@ -8,13 +8,52 @@ export interface Todo {
   completed: number;
 }
 
-// Single Connection: Handles both UI (Writes) and Sync (Replication)
-// We MUST use openSync for writes to be tracked!
-const db = openSync({
-  name: DATABASE_NAME,
-  url: process.env.EXPO_PUBLIC_TURSO_URL!,
-  authToken: process.env.EXPO_PUBLIC_TURSO_AUTH_TOKEN!,
-});
+// Helper to safely delete the database
+export const resetDatabase = () => {
+  console.warn('[db] Resetting database...');
+  try {
+    // We try to open a local connection just to delete the file
+    // This avoids issues where we might not have a valid 'db' instance if openSync failed
+    const tempDb = open({ name: DATABASE_NAME });
+    tempDb.delete();
+    console.log('[db] Database deleted successfully.');
+  } catch (e) {
+    console.error('[db] Failed to delete database:', e);
+  }
+};
+
+let db: DB;
+
+try {
+  // Single Connection: Handles both UI (Writes) and Sync (Replication)
+  // We MUST use openSync for writes to be tracked!
+  db = openSync({
+    name: DATABASE_NAME,
+    url: process.env.EXPO_PUBLIC_TURSO_URL!,
+    authToken: process.env.EXPO_PUBLIC_TURSO_AUTH_TOKEN!,
+  });
+} catch (e: any) {
+  console.error('[db] Failed to open database:', e);
+  if (e.message && typeof e.message === 'string' && e.message.includes('wal_index')) {
+    console.error('[db] Detected "wal_index" error. Attempting auto-recovery by resetting database...');
+    resetDatabase();
+    // Retry opening after reset
+    try {
+      db = openSync({
+        name: DATABASE_NAME,
+        url: process.env.EXPO_PUBLIC_TURSO_URL!,
+        authToken: process.env.EXPO_PUBLIC_TURSO_AUTH_TOKEN!,
+      });
+      console.log('[db] Database recovered and opened successfully.');
+    } catch (retryError) {
+      console.error('[db] Critical: Failed to recover database after reset:', retryError);
+      // Fallback: throw to ensure we don't return an undefined db if strict
+      throw retryError;
+    }
+  } else {
+    throw e;
+  }
+}
 
 export const initDatabase = async () => {
   try {
@@ -59,8 +98,16 @@ export const syncDatabase = async () => {
     db.sync();
     console.log(`[db] Sync finished in ${performance.now() - start}ms`);
     notifyDatabaseChange();
-  } catch (error) {
+  } catch (error: any) {
     console.error('[db] Sync failed:', error);
+    if (error.message && typeof error.message === 'string' && error.message.includes('wal_index')) {
+      console.warn('[db] Sync error indicates corruption (wal_index). Triggering manual reset...');
+      resetDatabase();
+      // Note: We might need to reload the app or re-init the DB object here.
+      // For now, next time the app starts or a function calls openSync, it should work.
+      // We could also try to re-open `db` here if we made it a let variable, but `db` is global module scope.
+      // Ideally, notify user to restart.
+    }
   }
 };
 

@@ -12,7 +12,8 @@ export default function TabOneScreen() {
 
   const [inputText, setInputText] = useState('');
   const [syncing, setSyncing] = useState(false);
-  const [pendingTodos, setPendingTodos] = useState<Todo[]>([]); // Optimistic State
+  const [pendingTodos, setPendingTodos] = useState<Todo[]>([]); // Optimistic State for Adds
+  const [optimisticToggles, setOptimisticToggles] = useState<Record<number, number>>({}); // Optimistic State for Toggles
 
   const addTodo = async () => {
     if (inputText.trim() === '') return;
@@ -26,47 +27,68 @@ export default function TabOneScreen() {
     const newTodo: Todo = { id: tempId, text: textToAdd, completed: 0 };
     setPendingTodos(prev => [newTodo, ...prev]);
 
-    try {
-      const start = performance.now();
-      console.log('[Perf] Starting addTodo (Background Write)');
-      const db = getDb();
+    // Defer heavy work to next tick to allow paint
+    setTimeout(async () => {
+      try {
+        const start = performance.now();
+        console.log('[Perf] Starting addTodo (Background Write)');
+        const db = getDb();
 
-      // 3. BACKGROUND DB WRITE (Accept the 1.6s delay here, UI is already updated)
-      // Note: We use executeSync in a promise wrapper effectively by not awaiting the result *to block the UI painting* 
-      // but here we are in an async function.
-      // Actually, since we already updated the state, the UI has re-rendered.
-      // We await here just to know when to remove the pending item.
-      await db.execute('INSERT INTO todos (text) VALUES (?)', [textToAdd]);
+        // 3. BACKGROUND DB WRITE
+        await db.execute('INSERT INTO todos (text) VALUES (?)', [textToAdd]);
 
-      console.log('[Perf] DB Insert finished in:', performance.now() - start, 'ms');
+        console.log('[Perf] DB Insert finished in:', performance.now() - start, 'ms');
 
-      // 4. RECONCILIATION: DB has the item now (via useReactiveQuery), so remove pending
-      notifyDatabaseChange();
-      // Small delay to ensure the hook catches the new data before we remove the pending one
-      // to avoid a "flicker" (Item disappears from pending -> appears from DB)
-      setTimeout(() => {
+        // 4. RECONCILIATION
+        notifyDatabaseChange();
+        // Small delay to ensure hook updates
+        setTimeout(() => {
+          setPendingTodos(prev => prev.filter(t => t.id !== tempId));
+        }, 100);
+
+      } catch (e) {
+        console.error('Failed to add todo', e);
+        // Rollback
         setPendingTodos(prev => prev.filter(t => t.id !== tempId));
-      }, 100);
-
-    } catch (e) {
-      console.error('Failed to add todo', e);
-      // Rollback on failure
-      setPendingTodos(prev => prev.filter(t => t.id !== tempId));
-      setInputText(textToAdd); // Restore text
-      alert('Failed to save task.');
-    }
+        setInputText(textToAdd);
+        alert('Failed to save task.');
+      }
+    }, 0);
   };
 
-  const toggleTodo = async (id: number, completed: number) => {
-    // For toggle, we can also be optimistic, but let's stick to Add first.
-    // Ideally we update local state first.
-    try {
-      const db = getDb();
-      await db.execute('UPDATE todos SET completed = ? WHERE id = ?', [completed ? 0 : 1, id]);
-      notifyDatabaseChange();
-    } catch (e) {
-      console.error('Failed to toggle todo', e);
-    }
+  const toggleTodo = async (id: number, currentCompleted: number) => {
+    // 1. Calculate new state
+    const newCompleted = currentCompleted === 1 ? 0 : 1;
+
+    // 2. OPTIMISTIC UPDATE: Update UI immediately
+    setOptimisticToggles(prev => ({ ...prev, [id]: newCompleted }));
+
+    // Defer DB write
+    setTimeout(async () => {
+      try {
+        const db = getDb();
+        await db.execute('UPDATE todos SET completed = ? WHERE id = ?', [newCompleted, id]);
+        notifyDatabaseChange();
+
+        // Clear optimistic state after a moment to let DB result take over
+        setTimeout(() => {
+          setOptimisticToggles(prev => {
+            const newState = { ...prev };
+            delete newState[id];
+            return newState;
+          });
+        }, 500); // Wait for round trip/reactive query
+      } catch (e) {
+        console.error('Failed to toggle todo', e);
+        // Rollback
+        setOptimisticToggles(prev => {
+          const newState = { ...prev };
+          delete newState[id];
+          return newState;
+        });
+        alert('Failed to update task.');
+      }
+    }, 0);
   };
 
   const performSync = async () => {
@@ -113,17 +135,23 @@ export default function TabOneScreen() {
       <FlatList
         data={displayTodos}
         keyExtractor={(item) => item.id.toString()}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.todoItem}
-            onPress={() => toggleTodo(item.id, item.completed)}
-          >
-            <Text style={[styles.todoText, item.completed === 1 && styles.completedText]}>
-              {item.text}
-            </Text>
-            <View style={[styles.checkbox, item.completed === 1 && styles.checked]} />
-          </TouchableOpacity>
-        )}
+        renderItem={({ item }) => {
+          // Decide whether to show optimistic value or DB value
+          const isOptimistic = optimisticToggles.hasOwnProperty(item.id);
+          const completed = isOptimistic ? optimisticToggles[item.id] : item.completed;
+
+          return (
+            <TouchableOpacity
+              style={styles.todoItem}
+              onPress={() => toggleTodo(item.id, completed)}
+            >
+              <Text style={[styles.todoText, completed === 1 && styles.completedText]}>
+                {item.text}
+              </Text>
+              <View style={[styles.checkbox, completed === 1 && styles.checked]} />
+            </TouchableOpacity>
+          );
+        }}
       />
     </View>
   );
