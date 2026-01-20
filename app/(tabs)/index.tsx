@@ -1,98 +1,170 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { getDb, notifyDatabaseChange, syncDatabase, type Todo } from '@/db/database';
+import { useReactiveQuery } from '@/hooks/use-reactive-query';
+import { useState } from 'react';
+import { ActivityIndicator, FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+export default function TabOneScreen() {
+  const todos = useReactiveQuery<Todo>(
+    'SELECT * FROM todos ORDER BY id DESC',
+    [],
+    ['todos']
+  );
 
-export default function HomeScreen() {
+  const [inputText, setInputText] = useState('');
+  const [syncing, setSyncing] = useState(false);
+
+  // Removed manual loadTodos since the hook handles it reactively
+
+  const addTodo = async () => {
+    if (inputText.trim() === '') return;
+    try {
+      const db = getDb();
+      await db.execute('INSERT INTO todos (text) VALUES (?)', [inputText]);
+      setInputText('');
+      notifyDatabaseChange(); // Update UI immediately
+      performSync();
+    } catch (e) {
+      console.error('Failed to add todo', e);
+    }
+  };
+
+  const toggleTodo = async (id: number, completed: number) => {
+    try {
+      const db = getDb();
+      await db.execute('UPDATE todos SET completed = ? WHERE id = ?', [completed ? 0 : 1, id]);
+      notifyDatabaseChange(); // Update UI immediately
+      performSync();
+    } catch (e) {
+      console.error('Failed to toggle todo', e);
+    }
+  };
+
+  const performSync = async () => {
+    setSyncing(true);
+    try {
+      await syncDatabase();
+      console.log('Synced!');
+    } catch (e) {
+      console.error('Sync error', e);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Turso Sync (op-sqlite)</Text>
+        <TouchableOpacity onPress={performSync} disabled={syncing}>
+          {syncing ? (
+            <ActivityIndicator size="small" color="#000" />
+          ) : (
+            <Text style={styles.syncButton}>Sync Now</Text>
+          )}
+        </TouchableOpacity>
+      </View>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+      <View style={styles.inputContainer}>
+        <TextInput
+          style={styles.input}
+          value={inputText}
+          onChangeText={setInputText}
+          placeholder="New task..."
+          placeholderTextColor="#888"
+        />
+        <TouchableOpacity style={styles.addButton} onPress={addTodo}>
+          <Text style={styles.addButtonText}>Add</Text>
+        </TouchableOpacity>
+      </View>
+
+      <FlatList
+        data={todos}
+        keyExtractor={(item) => item.id.toString()}
+        renderItem={({ item }) => (
+          <TouchableOpacity
+            style={styles.todoItem}
+            onPress={() => toggleTodo(item.id, item.completed)}
+          >
+            <Text style={[styles.todoText, item.completed === 1 && styles.completedText]}>
+              {item.text}
+            </Text>
+            <View style={[styles.checkbox, item.completed === 1 && styles.checked]} />
+          </TouchableOpacity>
+        )}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  container: {
+    flex: 1,
+    padding: 20,
+    backgroundColor: '#fff',
+    paddingTop: 60,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#000',
+  },
+  syncButton: {
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    marginBottom: 20,
+  },
+  input: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 8,
+    padding: 12,
+    marginRight: 10,
+    color: '#000',
+  },
+  addButton: {
+    backgroundColor: '#007AFF',
+    borderRadius: 8,
+    padding: 12,
+    justifyContent: 'center',
+  },
+  addButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  todoItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    justifyContent: 'space-between',
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  todoText: {
+    fontSize: 16,
+    color: '#000',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  completedText: {
+    textDecorationLine: 'line-through',
+    color: '#888',
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#007AFF',
+  },
+  checked: {
+    backgroundColor: '#007AFF',
   },
 });
