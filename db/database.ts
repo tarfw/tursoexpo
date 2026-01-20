@@ -1,6 +1,6 @@
 import { openSync } from '@op-engineering/op-sqlite';
 
-const DATABASE_NAME = 'turso_op_v2.db';
+const DATABASE_NAME = 'turso_op_v6.db';
 
 export interface Todo {
   id: number;
@@ -8,6 +8,8 @@ export interface Todo {
   completed: number;
 }
 
+// Single Connection: Handles both UI (Writes) and Sync (Replication)
+// We MUST use openSync for writes to be tracked!
 const db = openSync({
   name: DATABASE_NAME,
   url: process.env.EXPO_PUBLIC_TURSO_URL!,
@@ -17,6 +19,7 @@ const db = openSync({
 export const initDatabase = async () => {
   try {
     console.log('[db] Initializing database...');
+    // Enable WAL for performance check
     db.execute('PRAGMA journal_mode = WAL;');
     console.log('[db] WAL mode set.');
 
@@ -27,7 +30,7 @@ export const initDatabase = async () => {
         completed INTEGER DEFAULT 0
       );
     `);
-    console.log('[db] Table "todos" created (or existed).');
+    console.log('[db] Table "todos" created.');
   } catch (e) {
     console.error('[db] Initialization failed:', e);
     throw e;
@@ -51,11 +54,13 @@ export const notifyDatabaseChange = () => {
 
 export const syncDatabase = async () => {
   try {
+    console.log('[db] Starting sync...');
+    const start = performance.now();
     db.sync();
-    console.log('Sync successful.');
+    console.log(`[db] Sync finished in ${performance.now() - start}ms`);
     notifyDatabaseChange();
   } catch (error) {
-    console.error('Sync failed:', error);
+    console.error('[db] Sync failed:', error);
   }
 };
 

@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 export default function TabOneScreen() {
-  const todos = useReactiveQuery<Todo>(
+  const dbTodos = useReactiveQuery<Todo>(
     'SELECT * FROM todos ORDER BY id DESC',
     [],
     ['todos']
@@ -12,28 +12,58 @@ export default function TabOneScreen() {
 
   const [inputText, setInputText] = useState('');
   const [syncing, setSyncing] = useState(false);
-
-  // Removed manual loadTodos since the hook handles it reactively
+  const [pendingTodos, setPendingTodos] = useState<Todo[]>([]); // Optimistic State
 
   const addTodo = async () => {
     if (inputText.trim() === '') return;
+    const textToAdd = inputText;
+
+    // 1. CLEAR UI INSTANTLY
+    setInputText('');
+
+    // 2. OPTIMISTIC UPDATE: Show item immediately
+    const tempId = Date.now();
+    const newTodo: Todo = { id: tempId, text: textToAdd, completed: 0 };
+    setPendingTodos(prev => [newTodo, ...prev]);
+
     try {
+      const start = performance.now();
+      console.log('[Perf] Starting addTodo (Background Write)');
       const db = getDb();
-      await db.execute('INSERT INTO todos (text) VALUES (?)', [inputText]);
-      setInputText('');
-      notifyDatabaseChange(); // Update UI immediately
-      performSync();
+
+      // 3. BACKGROUND DB WRITE (Accept the 1.6s delay here, UI is already updated)
+      // Note: We use executeSync in a promise wrapper effectively by not awaiting the result *to block the UI painting* 
+      // but here we are in an async function.
+      // Actually, since we already updated the state, the UI has re-rendered.
+      // We await here just to know when to remove the pending item.
+      await db.execute('INSERT INTO todos (text) VALUES (?)', [textToAdd]);
+
+      console.log('[Perf] DB Insert finished in:', performance.now() - start, 'ms');
+
+      // 4. RECONCILIATION: DB has the item now (via useReactiveQuery), so remove pending
+      notifyDatabaseChange();
+      // Small delay to ensure the hook catches the new data before we remove the pending one
+      // to avoid a "flicker" (Item disappears from pending -> appears from DB)
+      setTimeout(() => {
+        setPendingTodos(prev => prev.filter(t => t.id !== tempId));
+      }, 100);
+
     } catch (e) {
       console.error('Failed to add todo', e);
+      // Rollback on failure
+      setPendingTodos(prev => prev.filter(t => t.id !== tempId));
+      setInputText(textToAdd); // Restore text
+      alert('Failed to save task.');
     }
   };
 
   const toggleTodo = async (id: number, completed: number) => {
+    // For toggle, we can also be optimistic, but let's stick to Add first.
+    // Ideally we update local state first.
     try {
       const db = getDb();
       await db.execute('UPDATE todos SET completed = ? WHERE id = ?', [completed ? 0 : 1, id]);
-      notifyDatabaseChange(); // Update UI immediately
-      performSync();
+      notifyDatabaseChange();
     } catch (e) {
       console.error('Failed to toggle todo', e);
     }
@@ -51,10 +81,13 @@ export default function TabOneScreen() {
     }
   };
 
+  // Merge Pending + DB (Pending on top)
+  const displayTodos = [...pendingTodos, ...dbTodos];
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Turso Sync (op-sqlite)</Text>
+        <Text style={styles.title}>Turso Sync (Optimistic)</Text>
         <TouchableOpacity onPress={performSync} disabled={syncing}>
           {syncing ? (
             <ActivityIndicator size="small" color="#000" />
@@ -78,7 +111,7 @@ export default function TabOneScreen() {
       </View>
 
       <FlatList
-        data={todos}
+        data={displayTodos}
         keyExtractor={(item) => item.id.toString()}
         renderItem={({ item }) => (
           <TouchableOpacity
